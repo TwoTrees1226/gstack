@@ -1,0 +1,193 @@
+---
+name: review
+version: 1.0.0-portable
+description: |
+  Pre-landing PR review. Analyzes diff against the base branch for SQL safety,
+  race conditions, trust boundary violations, and other structural issues.
+  Use when asked to "review this PR", "code review", "pre-landing review",
+  or "check my diff".
+allowed-tools:
+  - Bash
+  - Read
+  - Edit
+  - Write
+  - Grep
+  - Glob
+  - AskUserQuestion
+  - WebSearch
+---
+
+{{PREAMBLE}}
+
+{{BASE_BRANCH_DETECT}}
+
+---
+
+# Pre-Landing PR Review
+
+You are running the `/review` workflow. Analyze the current branch's diff against the base branch for structural issues that tests don't catch.
+
+---
+
+## Step 1: Check branch
+
+1. Run `git branch --show-current` to get the current branch.
+2. If on the base branch, output: **"Nothing to review — you're on the base branch or have no changes against it."** and stop.
+3. Run `git fetch origin <base> --quiet && git diff origin/<base> --stat` to check if there's a diff. If no diff, output the same message and stop.
+
+---
+
+## Step 1.5: Scope Drift Detection
+
+Before reviewing code quality, check: **did they build what was requested — nothing more, nothing less?**
+
+1. Read `TODOS.md` (if it exists). Read PR description if one exists. Read commit messages: `git log origin/<base>..HEAD --oneline`.
+2. Identify the **stated intent** — what was this branch supposed to accomplish?
+3. Run `git diff origin/<base> --stat` and compare files changed against the stated intent.
+4. Evaluate with skepticism:
+
+   **SCOPE CREEP detection:**
+   - Files changed that are unrelated to the stated intent
+   - New features or refactors not mentioned in the plan
+   - "While I was in there..." changes that expand blast radius
+
+   **MISSING REQUIREMENTS detection:**
+   - Requirements from TODOS.md/PR description not addressed in the diff
+   - Test coverage gaps for stated requirements
+   - Partial implementations (started but not finished)
+
+5. Output:
+   ```
+   Scope Check: [CLEAN / DRIFT DETECTED / REQUIREMENTS MISSING]
+   Intent: <1-line summary of what was requested>
+   Delivered: <1-line summary of what the diff actually does>
+   [If drift: list each out-of-scope change]
+   [If missing: list each unaddressed requirement]
+   ```
+
+6. This is **INFORMATIONAL** — does not block the review.
+
+---
+
+## Step 2: Read the checklist
+
+Read `checklist.md` (adjacent to this SKILL.md).
+
+**If the file cannot be read, STOP and report the error.**
+
+---
+
+## Step 3: Get the diff
+
+```bash
+git fetch origin <base> --quiet
+git diff origin/<base>
+```
+
+This includes both committed and uncommitted changes against the latest base branch.
+
+---
+
+## Step 4: Two-pass review
+
+Apply the checklist against the diff in two passes:
+
+1. **Pass 1 (CRITICAL):** SQL & Data Safety, Race Conditions & Concurrency, Trust Boundary Violations (LLM/user input), Enum & Value Completeness
+2. **Pass 2 (INFORMATIONAL):** Conditional Side Effects, Magic Numbers & String Coupling, Dead Code & Consistency, Test Gaps, View/Frontend, Performance & Bundle Impact
+
+**Enum & Value Completeness requires reading code OUTSIDE the diff.** When the diff introduces a new enum value, status, tier, or type constant, use Grep to find all files that reference sibling values, then Read those files to check if the new value is handled.
+
+**Search-before-recommending:** When recommending a fix pattern (especially for concurrency, caching, auth, or framework-specific behavior): verify it's current best practice for the framework version in use; check if a built-in solution exists in newer versions; verify API signatures against current docs. Takes seconds, prevents recommending outdated patterns.
+
+---
+
+## Step 5: Fix-First Review
+
+**Every finding gets action — not just critical ones.**
+
+Output summary header: `Pre-Landing Review: N issues (X critical, Y informational)`
+
+### Step 5a: Classify each finding
+
+For each finding, classify as AUTO-FIX or ASK:
+- **AUTO-FIX** (apply directly): Mechanical fixes where intent is unambiguous — dead code removal, stale comments, trivial syntax, straightforward null guards, import cleanup.
+- **ASK** (require user input): Anything requiring judgment — architectural changes, security-sensitive logic, race-condition fixes with behavioral trade-offs, anything that might break behavior.
+
+Critical findings lean toward ASK; informational findings lean toward AUTO-FIX.
+
+### Step 5b: Auto-fix all AUTO-FIX items
+
+Apply each fix directly. For each one, output a one-line summary:
+`[AUTO-FIXED] [file:line] Problem → what you did`
+
+### Step 5c: Batch-ask about ASK items
+
+If there are ASK items remaining, present them in ONE AskUserQuestion:
+
+- List each item with a number, severity label, problem, and recommended fix
+- Per-item options: A) Fix as recommended, B) Skip
+- Include an overall RECOMMENDATION
+
+Example:
+```
+I auto-fixed 5 issues. 2 need your input:
+
+1. [CRITICAL] app/models/post.rb:42 — Race condition in status transition
+   Fix: Add `WHERE status = 'draft'` to the UPDATE
+   → A) Fix  B) Skip
+
+2. [INFORMATIONAL] app/services/generator.rb:88 — LLM output not type-checked before DB write
+   Fix: Add JSON schema validation
+   → A) Fix  B) Skip
+
+RECOMMENDATION: Fix both — #1 is a real race condition, #2 prevents silent data corruption.
+```
+
+If 3 or fewer ASK items, you may use individual AskUserQuestion calls instead of batching.
+
+### Step 5d: Apply user-approved fixes
+
+Apply fixes for items where the user chose "Fix." Output what was fixed.
+
+### Verification of claims
+
+Before producing the final review output:
+- If you claim "this pattern is safe" → cite the specific line proving safety
+- If you claim "this is handled elsewhere" → read and cite the handling code
+- If you claim "tests cover this" → name the test file and method
+- Never say "likely handled" or "probably tested" — verify or flag as unknown
+
+**Rationalization prevention:** "This looks fine" is not a finding. Either cite evidence it IS fine, or flag it as unverified.
+
+---
+
+## Step 5.5: TODOS cross-reference
+
+Read `TODOS.md` in the repository root (if it exists). Cross-reference the PR against open TODOs:
+
+- **Does this PR close any open TODOs?** Note which: "This PR addresses TODO: <title>"
+- **Does this PR create work that should become a TODO?** Flag as informational finding.
+- **Are there related TODOs that provide context?** Reference them in related findings.
+
+If TODOS.md doesn't exist, skip silently.
+
+---
+
+## Step 5.6: Documentation staleness check
+
+Cross-reference the diff against documentation files. For each `.md` file in the repo root (README.md, ARCHITECTURE.md, CONTRIBUTING.md, CLAUDE.md, etc.):
+
+1. Check if code changes in the diff affect features/components/workflows described in that doc.
+2. If the doc was NOT updated in this branch but the code it describes WAS changed, flag as INFORMATIONAL:
+   "Documentation may be stale: [file] describes [feature] but code changed in this branch."
+
+Informational only — never critical.
+
+---
+
+## Important Rules
+
+- **Read the FULL diff before commenting.** Do not flag issues already addressed in the diff.
+- **Fix-first, not read-only.** AUTO-FIX items are applied directly. ASK items only after user approval. Never commit, push, or create PRs — that's /ship's job.
+- **Be terse.** One line problem, one line fix. No preamble.
+- **Only flag real problems.** Skip anything that's fine.
